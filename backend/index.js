@@ -17,6 +17,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Support Vercel multi-service route prefix stripping dynamically
+app.use((req, res, next) => {
+  if (req.url.startsWith('/_/backend')) {
+    req.url = req.url.slice('/_/backend'.length) || '/';
+  }
+  next();
+});
+
 // ── Health check ────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'xeno-crm-backend', timestamp: new Date().toISOString() });
