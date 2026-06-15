@@ -61,8 +61,8 @@ router.post('/', async (req, res) => {
         [campaign.id]
       );
 
-      // Create communications + enqueue
-      let enqueued = 0;
+      // Create all communication records first (synchronous)
+      const commsData = [];
       for (const customer of customers) {
         const commRes = await db.query(
           `INSERT INTO communications
@@ -71,32 +71,28 @@ router.post('/', async (req, res) => {
            RETURNING id`,
           [campaign.id, variant.id, customer.id, channel, message_template]
         );
-        const commId = commRes.rows[0].id;
-
-        // Async personalize + send (non-blocking)
-        enqueuePersonalizeAndSend({
-          communicationId: commId,
-          customer,
-          template: message_template,
-          channel,
-          variantId: variant.id,
-          campaignId: campaign.id,
-        }).catch(console.error);
-
-        enqueued++;
+        commsData.push({ communicationId: commRes.rows[0].id, customer });
       }
 
-      // Update variant recipient count
       await db.query(
         `UPDATE campaign_variants SET recipient_count = $1 WHERE id = $2`,
-        [enqueued, variant.id]
+        [commsData.length, variant.id]
+      );
+
+      // Launch in batches (non-blocking — API responds immediately)
+      const commonArgs = { template: message_template, channel, variantId: variant.id, campaignId: campaign.id };
+      setImmediate(() =>
+        launchCampaignInBatches(
+          commsData.map(d => ({ ...d.customer, _commId: d.communicationId })),
+          commonArgs
+        ).catch(console.error)
       );
 
       return res.status(201).json({
         campaign: { ...campaign, status: 'running' },
         variant,
-        recipients: enqueued,
-        message: `Campaign launched to ${enqueued} recipients`,
+        recipients: commsData.length,
+        message: `Campaign launched to ${commsData.length} recipients`,
       });
     }
 
@@ -109,10 +105,11 @@ router.post('/', async (req, res) => {
 
 /**
  * Background: personalize message then enqueue for sending
+ * Falls back to raw template if Gemini is unavailable/rate-limited
  */
 async function enqueuePersonalizeAndSend({ communicationId, customer, template, channel, variantId, campaignId }) {
   try {
-    // Personalize with Gemini
+    // Try Gemini personalization
     const { message } = await gemini.personalizeMessage(template, {
       name: customer.name,
       city: customer.city,
@@ -122,42 +119,55 @@ async function enqueuePersonalizeAndSend({ communicationId, customer, template, 
       tier: customer.tier,
     });
 
-    // Update communication with personalized message
     await db.query(
       `UPDATE communications SET personalized_message = $1 WHERE id = $2`,
       [message, communicationId]
     );
 
-    // Enqueue send job
     await enqueueCommunication({
       communicationId,
-      recipient: {
-        id: customer.id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-      },
+      recipient: { id: customer.id, name: customer.name, email: customer.email, phone: customer.phone },
       message,
       channel,
       metadata: { campaignId, variantId },
     });
   } catch (err) {
-    console.error(`Personalize/enqueue error for ${communicationId}:`, err.message);
-    // Fall back to template if Gemini fails
+    // Graceful fallback: use template with basic name substitution
+    const fallbackMsg = template.replace(/\{name\}/g, customer.name);
+    console.warn(`[Campaign] Gemini unavailable for ${communicationId} — using template fallback`);
     await enqueueCommunication({
       communicationId,
-      recipient: {
-        id: customer.id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-      },
-      message: template.replace('{name}', customer.name),
+      recipient: { id: customer.id, name: customer.name, email: customer.email, phone: customer.phone },
+      message: fallbackMsg,
       channel,
       metadata: { campaignId, variantId },
     });
   }
 }
+
+/**
+ * Staggered launch: process in batches of 5 with 12s gap
+ * Keeps Gemini calls within 5 RPM free-tier limit
+ */
+async function launchCampaignInBatches(customers, commonArgs) {
+  const BATCH_SIZE = 5;
+  const BATCH_DELAY_MS = 13000; // 13s → safe margin for 5 RPM
+
+  for (let i = 0; i < customers.length; i += BATCH_SIZE) {
+    const batch = customers.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(customer =>
+      enqueuePersonalizeAndSend({
+        ...commonArgs,
+        communicationId: customer._commId,
+        customer,
+      })
+    ));
+    if (i + BATCH_SIZE < customers.length) {
+      await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+    }
+  }
+}
+
 
 /**
  * GET /api/campaigns

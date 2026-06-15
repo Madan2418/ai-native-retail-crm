@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config(); // trigger-restart-backend
 const express = require('express');
 const cors = require('cors');
 

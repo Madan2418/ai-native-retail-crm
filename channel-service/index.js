@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config(); // trigger-restart-channel
 const express = require('express');
 const cors = require('cors');
 

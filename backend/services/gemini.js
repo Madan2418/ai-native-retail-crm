@@ -1,29 +1,30 @@
-/**
- * Gemini AI Service — all AI integrations go through here
- * Uses Google Generative AI SDK
- */
 require('dotenv').config();
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+  console.warn('[Gemini] GEMINI_API_KEY not set — AI endpoints will return mock responses');
+}
 
-const flash = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-const pro   = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
+const genAI = apiKey && apiKey !== 'your_gemini_api_key_here'
+  ? new GoogleGenerativeAI(apiKey)
+  : null;
+
+const flash = genAI ? genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }) : null;
+const pro   = genAI ? genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }) : null;
 
 /**
  * Helper: call Gemini and parse JSON from response
  */
 async function callGeminiJSON(model, prompt) {
+  if (!model) throw new Error('GEMINI_API_KEY is not configured. Add it to backend/.env');
   try {
     const result = await model.generateContent(prompt);
     const text = result.response.text();
-
-    // Strip markdown code fences if present
     const cleaned = text
       .replace(/```json\n?/g, '')
       .replace(/```\n?/g, '')
       .trim();
-
     return JSON.parse(cleaned);
   } catch (err) {
     console.error('Gemini JSON parse error:', err.message);
@@ -31,13 +32,12 @@ async function callGeminiJSON(model, prompt) {
   }
 }
 
-/**
- * Helper: call Gemini and return raw text
- */
 async function callGeminiText(model, prompt) {
+  if (!model) throw new Error('GEMINI_API_KEY is not configured');
   const result = await model.generateContent(prompt);
   return result.response.text().trim();
 }
+
 
 // ============================================================
 // 1. NL → Campaign Builder
